@@ -1,4 +1,4 @@
-import {Router, router} from 'express'
+import { Router } from 'express';
 
 export const matchRouter = Router()
 
