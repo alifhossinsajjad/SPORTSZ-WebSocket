@@ -1,15 +1,12 @@
-import { Router } from 'express';
-import { createMatchSchema } from '../validation/matches';
+import { Router } from "express";
+import { createMatchSchema } from "../validation/matches";
 
-export const matchRouter = Router()
+export const matchRouter = Router();
 
+matchRouter.get("/", (req, res) => {
+  res.status(200).json({ message: "Match list" });
+});
 
-matchRouter.get('/', (req, res)=> {
-    res.status(200).json({message: 'Match list'})
-})
-
-
-matchRouter.post('/', (req, res)=> {
-    const parsed = createMatchSchema.safeParse(req.body)
-    
-})
+matchRouter.post("/", (req, res) => {
+  const parsed = createMatchSchema.safeParse(req.body);
+});
