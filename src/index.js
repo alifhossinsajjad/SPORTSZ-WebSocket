@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import { matchRouter } from "./routes/matches.js";
 import { attachWebsocketServer } from "./ws/server.js";
+import { securityMiddleware } from "./arcjet.js";
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -16,6 +17,14 @@ app.use(express.json());
 app.get("/", (req, res) => {
   res.send("Sports Server run successfully");
 });
+
+
+
+app.use(securityMiddleware())
+
+
+
+
 
 app.use("/matches", matchRouter);
 
