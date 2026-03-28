@@ -1,42 +1,57 @@
 import { WebSocketServer, WebSocket } from "ws";
-import { wsArcjet } from "../arcjet";
+import { wsArcjet } from "../arcjet.js";
 
-const rooms = new Map();
+/* 
+   In-memory room system
+ */
+const rooms = new Map(); // matchId → Set<socket>
 
-// matchId → Set of sockets
+/* 
+   Helpers
+ */
+
+function safeSend(socket, message) {
+  if (socket.readyState !== WebSocket.OPEN) return;
+
+  // prevent memory overload (backpressure)
+  if (socket.bufferedAmount > 1_000_000) {
+    console.warn("Skipping slow client");
+    return;
+  }
+
+  try {
+    socket.send(message);
+  } catch (err) {
+    console.error("Send error:", err);
+  }
+}
+
+function sendJson(socket, payload) {
+  safeSend(socket, JSON.stringify(payload));
+}
 
 function joinRoom(matchId, socket) {
   if (!rooms.has(matchId)) {
     rooms.set(matchId, new Set());
   }
+
   rooms.get(matchId).add(socket);
+  socket.matchId = matchId; // ✅ track for cleanup
 }
 
 function leaveRoom(socket) {
-  for (const [matchId, clients] of rooms.entries()) {
-    if (clients.has(socket)) {
-      clients.delete(socket);
+  const matchId = socket.matchId;
+  if (!matchId) return;
 
-      if (clients.size === 0) {
-        rooms.delete(matchId);
-      }
-    }
+  const clients = rooms.get(matchId);
+  if (!clients) return;
+
+  clients.delete(socket);
+
+  if (clients.size === 0) {
+    rooms.delete(matchId);
   }
 }
-
-function sendJson(socket, payload) {
-  if (socket.readyState !== WebSocket.OPEN) return;
-
-  try {
-    socket.send(JSON.stringify(payload));
-  } catch (err) {
-    console.error(err);
-  }
-}
-
-/* =========================
-   Broadcast to specific match
-========================= */
 
 function broadcastToMatch(matchId, payload) {
   const clients = rooms.get(matchId);
@@ -45,43 +60,53 @@ function broadcastToMatch(matchId, payload) {
   const message = JSON.stringify(payload);
 
   for (const client of clients) {
-    if (client.readyState !== WebSocket.OPEN) continue;
-
-    try {
-      client.send(message);
-    } catch (err) {
-      console.error(err);
-    }
+    safeSend(client, message);
   }
 }
 
-/* =========================
+/* 
+   Arcjet Wrapper (clean)
+ */
+async function protectSocket(req, socket) {
+  if (!wsArcjet) return true;
+
+  try {
+    const decision = await wsArcjet.protect(req);
+
+    if (decision.isDenied()) {
+      const code = decision.reason.isRateLimit() ? 1013 : 1008;
+      const reason = decision.reason.isRateLimit()
+        ? "Rate limit exceeded"
+        : "Access denied";
+
+      socket.close(code, reason);
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    console.error("Arcjet error:", err);
+    socket.terminate();
+    return false;
+  }
+}
+
+/* 
    WebSocket Server
-========================= */
+ */
+
 export function attachWebsocketServer(server) {
-  const wss = new WebSocketServer({ server, path: "/ws" });
+  const wss = new WebSocketServer({
+    server,
+    path: "/ws",
+    maxPayload: 1024 * 1024, // 1MB
+  });
 
   wss.on("connection", async (socket, req) => {
-    console.log("Client connected");
+    console.info("WS connected");
 
-    if (wsArcjet) {
-      try {
-        const decision = await wsArcjet.protect(req);
-        if (decision.isDenied()) {
-          const code = decision.reason.isRateLimit() ? 1013 : 1008;
-          const resion = decision.reason.isRateLimit()
-            ? "Rate Limit Exceeded"
-            : "Access Denied";
-          socket.close(code, resion);
-          return;
-        }
-      } catch (err) {
-        console.log("WS Connection Error", err);
-        socket.terminate();
-        // socket.close(code, reason);
-        return;
-      }
-    }
+    const allowed = await protectSocket(req, socket);
+    if (!allowed) return;
 
     socket.isAlive = true;
 
@@ -89,25 +114,38 @@ export function attachWebsocketServer(server) {
 
     socket.on("message", (data) => {
       try {
+        if (data.length > 1_000_000) {
+          throw new Error("Payload too large");
+        }
+
         const msg = JSON.parse(data.toString());
 
-        // 🔥 JOIN MATCH ROOM
-        if (msg.type === "joinMatch") {
-          joinRoom(msg.matchId, socket);
+        switch (msg.type) {
+          case "joinMatch":
+            joinRoom(msg.matchId, socket);
 
-          sendJson(socket, {
-            type: "joined",
-            matchId: msg.matchId,
-          });
+            sendJson(socket, {
+              type: "joined",
+              matchId: msg.matchId,
+            });
+            break;
+
+          default:
+            console.warn("Unknown message type:", msg.type);
         }
       } catch (err) {
-        console.error("Invalid message", err);
+        console.error("Message error:", err.message);
+        sendJson(socket, { type: "error", message: "Invalid message" });
       }
     });
 
     socket.on("close", () => {
       leaveRoom(socket);
-      console.log("Client disconnected");
+      console.info("WS disconnected");
+    });
+
+    socket.on("error", (err) => {
+      console.error("Socket error:", err);
     });
 
     socket.on("pong", () => {
@@ -115,21 +153,26 @@ export function attachWebsocketServer(server) {
     });
   });
 
-  /* =========================
-     Heartbeat
-  ========================= */
-  setInterval(() => {
+  /*
+     Heartbeat (FIXED)
+  */
+  const interval = setInterval(() => {
     for (const socket of wss.clients) {
-      if (!socket.isAlive) return socket.terminate();
+      if (!socket.isAlive) {
+        socket.terminate();
+        continue; // ✅ FIXED
+      }
 
       socket.isAlive = false;
       socket.ping();
     }
   }, 30000);
 
-  /* =========================
-     External API (IMPORTANT)
-  ========================= */
+  wss.on("close", () => clearInterval(interval));
+
+  /* 
+     External API
+   */
   function broadcastScoreUpdate(matchId, score) {
     broadcastToMatch(matchId, {
       type: "scoreUpdate",
