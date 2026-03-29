@@ -4,6 +4,7 @@ import cors from "cors";
 import { matchRouter } from "./routes/matches.js";
 import { attachWebsocketServer } from "./ws/server.js";
 import { securityMiddleware } from "./arcjet.js";
+import { commentaryRouter } from "./routes/commentary.js";
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -18,29 +19,23 @@ app.get("/", (req, res) => {
   res.send("Sports Server run successfully");
 });
 
-
-
-app.use(securityMiddleware())
-
-
-
-
+app.use(securityMiddleware());
 
 app.use("/matches", matchRouter);
+app.use("/matches/:id/commentary", commentaryRouter);
 
-const { broadcastMatchCreated } = attachWebsocketServer(server);
 
-app.locals.broadcastMatchCreated = broadcastMatchCreated;
+
+/* WebSocket */
+const { broadcastToMatchClients } = attachWebsocketServer(server);
+app.locals.broadcastToMatchClients = broadcastToMatchClients;
 
 server.listen(PORT, HOST, () => {
   const baseUrl =
     HOST === "0.0.0.0" ? `http://localhost:${PORT}` : `http://${HOST}: ${PORT}`;
 
-
-
   console.log(`server running on the : ${baseUrl}`);
-console.log(`WebSocket Sever is running on : ${baseUrl.replace("http", "ws")}/ws`)
-
-
-
+  console.log(
+    `WebSocket Sever is running on : ${baseUrl.replace("http", "ws")}/ws`,
+  );
 });
