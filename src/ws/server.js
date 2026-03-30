@@ -1,186 +1,168 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { wsArcjet } from "../arcjet.js";
 
-/* 
-   In-memory room system
- */
-const rooms = new Map(); // matchId → Set<socket>
 
-/* 
-   Helpers
- */
+const matchSubscribers = new Map();
 
-function safeSend(socket, message) {
-  if (socket.readyState !== WebSocket.OPEN) return;
-
-  // prevent memory overload (backpressure)
-  if (socket.bufferedAmount > 1_000_000) {
-    console.warn("Skipping slow client");
-    return;
+function subscribe(matchId, socket) {
+  if (!matchSubscribers.has(matchId)) {
+    matchSubscribers.set(matchId, new Set());
   }
 
-  try {
-    socket.send(message);
-  } catch (err) {
-    console.error("Send error:", err);
+  matchSubscribers.get(matchId).add(socket);
+}
+
+function unsubscribe(matchId, socket) {
+  const subscribers = matchSubscribers.get(matchId);
+
+  if (!subscribers) return;
+
+  subscribers.delete(socket);
+
+  if (subscribers.size === 0) {
+    matchSubscribers.delete(matchId);
+  }
+}
+
+function cleanupSubscriptions(socket) {
+  for (const matchId of socket.subscriptions) {
+    unsubscribe(matchId, socket);
   }
 }
 
 function sendJson(socket, payload) {
-  safeSend(socket, JSON.stringify(payload));
+  if (socket.readyState !== WebSocket.OPEN) return;
+
+  socket.send(JSON.stringify(payload));
 }
 
-function joinRoom(matchId, socket) {
-  if (!rooms.has(matchId)) {
-    rooms.set(matchId, new Set());
-  }
+function broadcastToAll(wss, payload) {
+  for (const client of wss.clients) {
+    if (client.readyState !== WebSocket.OPEN) continue;
 
-  rooms.get(matchId).add(socket);
-  socket.matchId = matchId; // ✅ track for cleanup
-}
-
-function leaveRoom(socket) {
-  const matchId = socket.matchId;
-  if (!matchId) return;
-
-  const clients = rooms.get(matchId);
-  if (!clients) return;
-
-  clients.delete(socket);
-
-  if (clients.size === 0) {
-    rooms.delete(matchId);
+    client.send(JSON.stringify(payload));
   }
 }
 
 function broadcastToMatch(matchId, payload) {
-  const clients = rooms.get(matchId);
-  if (!clients) return;
+  const subscribers = matchSubscribers.get(matchId);
+  if (!subscribers || subscribers.size === 0) return;
 
   const message = JSON.stringify(payload);
 
-  for (const client of clients) {
-    safeSend(client, message);
+  for (const client of subscribers) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
   }
 }
 
-/* 
-   Arcjet Wrapper (clean)
- */
-async function protectSocket(req, socket) {
-  if (!wsArcjet) return true;
+function handleMessage(socket, data) {
+  let message;
 
   try {
-    const decision = await wsArcjet.protect(req);
+    message = JSON.parse(data.toString());
+  } catch {
+    sendJson(socket, { type: "error", message: "Invalid JSON" });
+  }
 
-    if (decision.isDenied()) {
-      const code = decision.reason.isRateLimit() ? 1013 : 1008;
-      const reason = decision.reason.isRateLimit()
-        ? "Rate limit exceeded"
-        : "Access denied";
+  if (message?.type === "subscribe" && Number.isInteger(message.matchId)) {
+    subscribe(message.matchId, socket);
+    socket.subscriptions.add(message.matchId);
+    sendJson(socket, { type: "subscribed", matchId: message.matchId });
+    return;
+  }
 
-      socket.close(code, reason);
-      return false;
-    }
-
-    return true;
-  } catch (err) {
-    console.error("Arcjet error:", err);
-    socket.terminate();
-    return false;
+  if (message?.type === "unsubscribe" && Number.isInteger(message.matchId)) {
+    unsubscribe(message.matchId, socket);
+    socket.subscriptions.delete(message.matchId);
+    sendJson(socket, { type: "unsubscribed", matchId: message.matchId });
   }
 }
-
-/* 
-   WebSocket Server
- */
 
 export function attachWebsocketServer(server) {
   const wss = new WebSocketServer({
-    server,
+    noServer: true,
     path: "/ws",
-    maxPayload: 1024 * 1024, // 1MB
+    maxPayload: 1024 * 1024,
+  });
+
+  server.on("upgrade", async (req, socket, head) => {
+    const { pathname } = new URL(req.url, `http://${req.headers.host}`);
+
+    if (pathname !== "/ws") {
+      return;
+    }
+
+    if (wsArcjet) {
+      try {
+        const decision = await wsArcjet.protect(req);
+
+        if (decision.isDenied()) {
+          if (decision.reason.isRateLimit()) {
+            socket.write("HTTP/1.1 429 Too Many Requests\r\n\r\n");
+          } else {
+            socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+          }
+          socket.destroy();
+          return;
+        }
+      } catch (e) {
+        console.error("WS upgrade protection error", e);
+        socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\n");
+        socket.destroy();
+        return;
+      }
+    }
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit("connection", ws, req);
+    });
   });
 
   wss.on("connection", async (socket, req) => {
-    console.info("WS connected");
-
-    const allowed = await protectSocket(req, socket);
-    if (!allowed) return;
-
     socket.isAlive = true;
+    socket.on("pong", () => {
+      socket.isAlive = true;
+    });
+
+    socket.subscriptions = new Set();
 
     sendJson(socket, { type: "welcome" });
 
     socket.on("message", (data) => {
-      try {
-        if (data.length > 1_000_000) {
-          throw new Error("Payload too large");
-        }
+      handleMessage(socket, data);
+    });
 
-        const msg = JSON.parse(data.toString());
-
-        switch (msg.type) {
-          case "joinMatch":
-            joinRoom(msg.matchId, socket);
-
-            sendJson(socket, {
-              type: "joined",
-              matchId: msg.matchId,
-            });
-            break;
-
-          default:
-            console.warn("Unknown message type:", msg.type);
-        }
-      } catch (err) {
-        console.error("Message error:", err.message);
-        sendJson(socket, { type: "error", message: "Invalid message" });
-      }
+    socket.on("error", () => {
+      socket.terminate();
     });
 
     socket.on("close", () => {
-      leaveRoom(socket);
-      console.info("WS disconnected");
+      cleanupSubscriptions(socket);
     });
 
-    socket.on("error", (err) => {
-      console.error("Socket error:", err);
-    });
-
-    socket.on("pong", () => {
-      socket.isAlive = true;
-    });
+    socket.on("error", console.error);
   });
 
-  /*
-     Heartbeat (FIXED)
-  */
   const interval = setInterval(() => {
-    for (const socket of wss.clients) {
-      if (!socket.isAlive) {
-        socket.terminate();
-        continue; // ✅ FIXED
-      }
+    wss.clients.forEach((ws) => {
+      if (ws.isAlive === false) return ws.terminate();
 
-      socket.isAlive = false;
-      socket.ping();
-    }
+      ws.isAlive = false;
+      ws.ping();
+    });
   }, 30000);
 
   wss.on("close", () => clearInterval(interval));
 
-  /* 
-     External API
-   */
-  function broadcastScoreUpdate(matchId, score) {
-    broadcastToMatch(matchId, {
-      type: "scoreUpdate",
-      data: score,
-    });
+  function broadcastMatchCreated(match) {
+    broadcastToAll(wss, { type: "match_created", data: match });
   }
 
-  return {
-    broadcastScoreUpdate,
-  };
+  function broadcastCommentary(matchId, comment) {
+    broadcastToMatch(matchId, { type: "commentary", data: comment });
+  }
+
+  return { broadcastMatchCreated, broadcastCommentary };
 }

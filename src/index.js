@@ -2,7 +2,7 @@ import http from "http";
 import express from "express";
 import cors from "cors";
 import { matchRouter } from "./routes/matches.js";
-import { attachWebsocketServer } from "./ws/server.js";
+import {attachWebsocketServer} from "../src/ws/server.js"
 import { securityMiddleware } from "./arcjet.js";
 import { commentaryRouter } from "./routes/commentary.js";
 
