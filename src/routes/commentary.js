@@ -7,6 +7,9 @@ import {
   listCommentaryQuerySchema,
 } from "../validation/commentary";
 import { matchIdParamSchema } from "../validation/matches.js";
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 
 export const commentaryRouter = Router({ mergeParams: true });
 
