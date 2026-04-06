@@ -1,12 +1,12 @@
+import { desc, eq } from "drizzle-orm";
 import { Router } from "express";
-import { eq, desc } from "drizzle-orm";
 import { db } from "../db/db.js";
 import { commentary } from "../db/schema.js";
-import { matchIdParamSchema } from "../validation/matches.js";
 import {
   createCommentarySchema,
   listCommentaryQuerySchema,
 } from "../validation/commentary";
+import { matchIdParamSchema } from "../validation/matches.js";
 
 export const commentaryRouter = Router({ mergeParams: true });
 
@@ -107,7 +107,10 @@ commentaryRouter.post("/", async (req, res) => {
       })
       .returning();
 
-    return res.status(201).json({ data: entry });
+    if (res.app.locals.broadcastCommentary){
+      res.app.locals.broadcastCommentary(entry.matchId, entry);
+    }
+      return res.status(201).json({ data: entry });
   } catch (e) {
     return res.status(500).json({
       error: "Failed to create commentary entry.",
