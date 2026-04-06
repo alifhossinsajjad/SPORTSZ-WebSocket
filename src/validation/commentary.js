@@ -14,6 +14,22 @@ export const createCommentarySchema = z.preprocess(
         delete obj.metaData;
       }
 
+      // 🔥 Normalize eventType (e.g., "goal" -> "GOAL")
+      if (typeof obj.eventType === "string") {
+        obj.eventType = obj.eventType.toUpperCase().replace(/\s+/g, "_");
+      }
+
+      // 🔥 Normalize period (e.g., "3nd half" -> "ET_FIRST_HALF")
+      if (typeof obj.period === "string") {
+        let p = obj.period.toUpperCase().replace(/\s+/g, "_");
+        // Map common variations
+        if (p === "1ST_HALF") p = "FIRST_HALF";
+        if (p === "2ND_HALF") p = "SECOND_HALF";
+        if (p === "3RD_HALF" || p === "3ND_HALF") p = "ET_FIRST_HALF";
+        if (p === "4TH_HALF") p = "ET_SECOND_HALF";
+        obj.period = p;
+      }
+
       return obj;
     }
     return input;
@@ -29,6 +45,7 @@ export const createCommentarySchema = z.preprocess(
         "SECOND_HALF",
         "ET_FIRST_HALF",
         "ET_SECOND_HALF",
+        "PENALTIES",
       ]),
 
       eventType: z.enum(["GOAL", "YELLOW_CARD", "RED_CARD", "SUBSTITUTION"]),
